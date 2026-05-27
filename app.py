@@ -2,60 +2,67 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
-from datetime import datetime
-
-# --- CREDENTIALS CONFIG ---
-import streamlit as st
-import gspread
-from google.oauth2.service_account import Credentials
 import json
 import os
+from datetime import datetime
 
-# --- CREDENTIALS CONFIG ---
-scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+# --- 1. SETTINGS ---
+SHEET_NAME = "Grocery_Management_System"  # MUST match your Google Sheet name exactly
+SCOPE = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 
+# --- 2. CREDENTIAL LOADING ---
 def load_creds():
-    # 1. Try Render Environment Variable (The "Secret" you added in Render dashboard)
+    # Try Render Environment Variable first
     if "gcp_service_account" in os.environ:
         try:
             creds_json = os.environ.get("gcp_service_account")
-            # Render sometimes adds extra quotes, this cleans it up
             if creds_json.startswith("'") and creds_json.endswith("'"):
                 creds_json = creds_json[1:-1]
-            
             info = json.loads(creds_json)
-            return Credentials.from_service_account_info(info, scopes=scope)
+            return Credentials.from_service_account_info(info, scopes=SCOPE)
         except Exception as e:
             st.error(f"Error parsing Environment Variable: {e}")
 
-    # 2. Try Local File (For testing on your laptop)
+    # Try Local File
     if os.path.exists("google_creds.json"):
-        return Credentials.from_service_account_file("google_creds.json", scopes=scope)
+        return Credentials.from_service_account_file("google_creds.json", scopes=SCOPE)
 
-    # 3. If neither exists
-    st.error("No credentials found! Make sure 'gcp_service_account' is set in Render Environment.")
+    st.error("No credentials found! Set 'gcp_service_account' in Render or add 'google_creds.json' locally.")
     st.stop()
 
-# Initialize connection
-creds = load_creds()
-client = gspread.authorize(creds)
-# --- UTILS ---
+# --- 3. INITIALIZE CONNECTION ---
+# We define these at the top level so all functions can see them
+try:
+    creds = load_creds()
+    client = gspread.authorize(creds)
+    sh = client.open(SHEET_NAME) # This defines 'sh' globally
+except Exception as e:
+    st.error(f"Failed to connect to Google Sheets: {e}")
+    st.stop()
+
+# --- 4. HELPER FUNCTIONS ---
 def get_inventory_sheet():
     month_title = f"Inventory_{datetime.now().strftime('%b_%Y')}"
-    return sh.worksheet(month_title)
+    try:
+        return sh.worksheet(month_title)
+    except:
+        # Fallback to the first inventory sheet found if current month doesn't exist yet
+        worksheets = [ws.title for ws in sh.worksheets() if "Inventory_" in ws.title]
+        return sh.worksheet(worksheets[0])
 
 def get_products():
     return sh.worksheet("Product_Master").col_values(1)[1:]
 
-# --- UI ---
+# --- 5. MAIN APP UI ---
 st.set_page_config(page_title="Grocery Inventory", layout="wide")
 st.sidebar.title("🛒 Grocery Admin")
 menu = st.sidebar.radio("Navigation", ["Amazon Entry", "Receiver View", "Daily Sales", "Inventory Report"])
 
+# Load dynamic data
 products = get_products()
 inv_ws = get_inventory_sheet()
 
-# --- 1. AMAZON ENTRY ---
+# --- PAGE: AMAZON ENTRY ---
 if menu == "Amazon Entry":
     st.header("📦 Amazon Order Input")
     with st.form("entry_form"):
@@ -66,7 +73,6 @@ if menu == "Amazon Entry":
         
         st.write("---")
         st.write("Enter Quantities:")
-        # Create columns for inputs to save vertical space
         cols = st.columns(3)
         input_data = []
         for i, p in enumerate(products):
@@ -75,40 +81,37 @@ if menu == "Amazon Entry":
                 input_data.append(qty)
         
         if st.form_submit_button("Log Order"):
-            # Format: Date, Slot, Account, Status, Products...
             row = [str(date), slot, acc, "Pending"] + input_data
             inv_ws.append_row(row)
             st.success("Order Logged in Google Sheets!")
 
-# --- 2. RECEIVER VIEW ---
+# --- PAGE: RECEIVER VIEW ---
 elif menu == "Receiver View":
     st.header("🚚 Incoming Deliveries")
     data = inv_ws.get_all_records()
     if data:
         df = pd.DataFrame(data)
-        # Filter for Pending orders
-        pending = df[df['Status'] == 'Pending']
-        
-        if pending.empty:
-            st.success("No pending items to receive!")
+        if 'Status' in df.columns:
+            pending = df[df['Status'] == 'Pending']
+            
+            if pending.empty:
+                st.success("No pending items to receive!")
+            else:
+                for index, row in pending.iterrows():
+                    sheet_row_index = index + 2 
+                    with st.expander(f"Order: {row['Account']} | Slot: {row['Slot']}"):
+                        for p in products:
+                            if row.get(p, 0) > 0:
+                                st.write(f"- {p}: **{row[p]}**")
+                        
+                        if st.button("Mark as Delivered", key=f"recv_{index}"):
+                            # Status is in Column D (4)
+                            inv_ws.update_cell(sheet_row_index, 4, "Delivered")
+                            st.rerun()
         else:
-            for index, row in pending.iterrows():
-                # Google Sheets is 1-indexed, +1 for header, +1 for row
-                sheet_row_index = index + 2 
-                
-                with st.expander(f"Order: {row['Account']} | Slot: {row['Slot']}"):
-                    st.write("**Verify items below:**")
-                    for p in products:
-                        if row[p] > 0:
-                            st.write(f"- {p}: **{row[p]}**")
-                    
-                    if st.button("Mark as Delivered", key=f"recv_{index}"):
-                        # Update status column (Column D = 4)
-                        inv_ws.update_cell(sheet_row_index, 4, "Delivered")
-                        st.balloons()
-                        st.rerun()
+            st.error("Column 'Status' not found in sheet.")
 
-# --- 3. DAILY SALES ---
+# --- PAGE: DAILY SALES ---
 elif menu == "Daily Sales":
     st.header("💰 Record Sales")
     with st.form("sales_form"):
@@ -120,18 +123,20 @@ elif menu == "Daily Sales":
             sh.worksheet("Sales_Log").append_row([str(datetime.now().date()), buyer, prod, sqty])
             st.success("Sale Logged!")
 
-# --- 4. INVENTORY REPORT ---
+# --- PAGE: INVENTORY REPORT ---
 elif menu == "Inventory Report":
     st.header("📊 Current Stock Status")
-    # Simple logic: Delivered - Sold
     inv_data = pd.DataFrame(inv_ws.get_all_records())
     sales_data = pd.DataFrame(sh.worksheet("Sales_Log").get_all_records())
     
     report = []
     for p in products:
-        received = inv_data[inv_data['Status'] == 'Delivered'][p].sum()
+        received = 0
+        if not inv_data.empty and p in inv_data.columns:
+            received = inv_data[inv_data['Status'] == 'Delivered'][p].sum()
+        
         sold = 0
-        if not sales_data.empty:
+        if not sales_data.empty and 'Product Name' in sales_data.columns:
             sold = sales_data[sales_data['Product Name'] == p]['Quantity Sold'].sum()
         
         report.append({

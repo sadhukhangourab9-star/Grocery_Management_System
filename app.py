@@ -28,43 +28,70 @@ creds = load_creds()
 client = gspread.authorize(creds)
 sh = client.open(SHEET_NAME)
 
-# --- DATABASE SYNC LOGIC (The "Setup" Button) ---
+# --- DATABASE SYNC LOGIC ---
 def sync_database_structure():
     with st.spinner("Syncing Database..."):
-        # 1. Ensure Slot Master exists
+        # 1. Ensure Product Master exists (Essential for app)
         try:
-            ws_slots = sh.worksheet("Slot_Master")
+            ws_prod = sh.worksheet("Product_Master")
+        except:
+            ws_prod = sh.add_worksheet(title="Product_Master", rows="100", cols="2")
+            ws_prod.update('A1', [['Product Name']])
+            st.warning("Product_Master created. Please add products there and sync again.")
+
+        # 2. Ensure Slot Master exists
+        try:
+            sh.worksheet("Slot_Master")
         except:
             ws_slots = sh.add_worksheet(title="Slot_Master", rows="100", cols="2")
             ws_slots.update('A1', [['Slots']])
             ws_slots.update('A2:A4', [['10 PM'], ['12 PM'], ['8 AM']])
 
-        # 2. Get the master product list
+        # 3. Get products
         products = sh.worksheet("Product_Master").col_values(1)[1:]
         
-        # 3. Handle Current Month Sheet
+        # 4. Handle Current Month Sheet
         month_title = f"Inventory_{datetime.now().strftime('%b_%Y')}"
         headers = ["Date", "Slot", "Account", "Order Name", "Status"] + products
         
         try:
             ws_inv = sh.worksheet(month_title)
-            # Update headers in case products were added
             ws_inv.update('A1', [headers])
         except:
             ws_inv = sh.add_worksheet(title=month_title, rows="1000", cols=str(len(headers) + 5))
             ws_inv.update('A1', [headers])
-            # Add Initial Old Stock row
             old_stock = ["-", "-", "Old Stock", "-", "Delivered"] + [0] * len(products)
             ws_inv.append_row(old_stock)
         
-        # 4. Ensure Sales Log exists
+        # 5. Ensure Sales Log exists
         try:
             sh.worksheet("Sales_Log")
         except:
             ws_sales = sh.add_worksheet(title="Sales_Log", rows="1000", cols="5")
             ws_sales.update('A1', [['Date', 'Buyer Name', 'Product Name', 'Quantity Sold']])
             
-    st.sidebar.success("Database Synced Successfully!")
+    st.sidebar.success("Database Synced!")
+    st.rerun()
+
+# --- DATA FETCHING (WITH ERROR HANDLING) ---
+def get_products():
+    try:
+        return sh.worksheet("Product_Master").col_values(1)[1:]
+    except:
+        return []
+
+def get_slots():
+    try:
+        return sh.worksheet("Slot_Master").col_values(1)[1:]
+    except:
+        return ["Default Slot"]
+
+def get_inventory_sheet():
+    month_title = f"Inventory_{datetime.now().strftime('%b_%Y')}"
+    try:
+        return sh.worksheet(month_title)
+    except:
+        return None
 
 # --- UI SETUP ---
 st.set_page_config(page_title="Grocery Dashboard", layout="wide")
@@ -77,24 +104,16 @@ if st.sidebar.button("🔄 Sync/Setup Database"):
 st.sidebar.write("---")
 menu = st.sidebar.radio("Navigation", ["Amazon Entry", "Receiver View", "Daily Sales", "Inventory & Summary"])
 
-# --- LOAD DATA ---
-def get_products():
-    return sh.worksheet("Product_Master").col_values(1)[1:]
-
-def get_slots():
-    return sh.worksheet("Slot_Master").col_values(1)[1:]
-
-def get_inventory_sheet():
-    month_title = f"Inventory_{datetime.now().strftime('%b_%Y')}"
-    try:
-        return sh.worksheet(month_title)
-    except:
-        st.warning("Current month sheet not found. Please click 'Sync Database' in the sidebar.")
-        st.stop()
-
+# Load variables
 products = get_products()
 slots = get_slots()
 inv_ws = get_inventory_sheet()
+
+# Check if DB is ready
+if not products or inv_ws is None:
+    st.error("⚠️ Database Not Ready")
+    st.info("Please click the 'Sync/Setup Database' button in the sidebar to initialize your sheets.")
+    st.stop()
 
 # --- 1. AMAZON ENTRY ---
 if menu == "Amazon Entry":
@@ -103,18 +122,15 @@ if menu == "Amazon Entry":
         col1, col2 = st.columns(2)
         date = col1.date_input("Order Date")
         slot = col2.selectbox("Slot", slots)
-        
         col3, col4 = st.columns(2)
         acc = col3.text_input("Account Name")
         order_name = col4.text_input("Order Name")
-        
         st.write("---")
         input_data = []
         cols = st.columns(3)
         for i, p in enumerate(products):
             with cols[i % 3]:
                 input_data.append(st.number_input(f"{p}", min_value=0, step=1, key=f"in_{p}"))
-        
         if st.form_submit_button("Log Order"):
             row = [str(date), slot, acc, order_name, "Pending"] + input_data
             inv_ws.append_row(row)
@@ -137,9 +153,7 @@ elif menu == "Receiver View":
                         for p in products:
                             if row.get(p, 0) > 0:
                                 st.write(f"- {p}: {row[p]}")
-                        
-                        if st.button("Mark Delivered", key=f"btn_{index}"):
-                            # Status is Column E (5)
+                        if st.button("Mark Delivered", key=f"recv_{index}"):
                             inv_ws.update_cell(index + 2, 5, "Delivered")
                             st.rerun()
 
@@ -157,14 +171,14 @@ elif menu == "Daily Sales":
 # --- 4. INVENTORY & SUMMARY ---
 elif menu == "Inventory & Summary":
     st.header("📊 Stock & Order Summary")
-    inv_data = pd.DataFrame(inv_ws.get_all_records())
+    data_records = inv_ws.get_all_records()
+    inv_data = pd.DataFrame(data_records) if data_records else pd.DataFrame()
     
     if not inv_data.empty:
         st.subheader("📋 Order Statistics")
         total_orders = len(inv_data) - 1
-        delivered = len(inv_data[inv_data['Status'] == 'Delivered'])
-        pending = len(inv_data[inv_data['Status'] == 'Pending'])
-        
+        delivered = len(inv_data[inv_data['Status'] == 'Delivered']) if 'Status' in inv_data.columns else 0
+        pending = len(inv_data[inv_data['Status'] == 'Pending']) if 'Status' in inv_data.columns else 0
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Orders", total_orders)
         col2.metric("Delivered", delivered)
@@ -172,7 +186,8 @@ elif menu == "Inventory & Summary":
 
     st.subheader("📦 Current Stock Status")
     try:
-        sales_data = pd.DataFrame(sh.worksheet("Sales_Log").get_all_records())
+        sales_records = sh.worksheet("Sales_Log").get_all_records()
+        sales_data = pd.DataFrame(sales_records)
     except:
         sales_data = pd.DataFrame()
 
@@ -181,5 +196,4 @@ elif menu == "Inventory & Summary":
         received = inv_data[inv_data['Status'] == 'Delivered'][p].sum() if not inv_data.empty and p in inv_data.columns else 0
         sold = sales_data[sales_data['Product Name'] == p]['Quantity Sold'].sum() if not sales_data.empty and 'Product Name' in sales_data.columns else 0
         report.append({"Product": p, "Received": received, "Sold": sold, "Stock": received - sold})
-    
     st.dataframe(pd.DataFrame(report), use_container_width=True)

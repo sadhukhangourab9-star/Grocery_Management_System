@@ -137,25 +137,66 @@ if menu == "Amazon Entry":
             st.success(f"Order '{order_name}' logged!")
 
 # --- 2. RECEIVER VIEW ---
+# --- 2. RECEIVER VIEW (UPDATED) ---
 elif menu == "Receiver View":
     st.header("🚚 Receiver's Verification")
-    data = inv_ws.get_all_records()
-    if data:
-        df = pd.DataFrame(data)
+    
+    data_records = inv_ws.get_all_records()
+    if data_records:
+        df = pd.DataFrame(data_records)
+        
         if 'Status' in df.columns:
             pending = df[df['Status'] == 'Pending']
+            
             if pending.empty:
-                st.info("No pending orders.")
+                st.success("🎉 No pending items to receive!")
             else:
+                # --- NEW: SLOT SUMMARY TABLE ---
+                st.subheader("📊 Total Expected Items (By Slot)")
+                selected_summary_slot = st.selectbox("Filter Summary by Slot:", ["All"] + list(pending['Slot'].unique()))
+                
+                # Filter data for the summary table
+                summary_df = pending.copy()
+                if selected_summary_slot != "All":
+                    summary_df = summary_df[summary_df['Slot'] == selected_summary_slot]
+                
+                # Calculate totals for products
+                totals = summary_df[products].sum().reset_index()
+                totals.columns = ['Product Name', 'Total Quantity']
+                # Show only products that have a quantity > 0
+                totals = totals[totals['Total Quantity'] > 0]
+                
+                if not totals.empty:
+                    st.table(totals)
+                else:
+                    st.info("No items found for this slot.")
+
+                st.write("---")
+                st.subheader("📦 Individual Order Breakdown")
+                
+                # Display individual expanders (Your existing view)
                 for index, row in pending.iterrows():
-                    with st.expander(f"📦 {row.get('Order Name', 'Unknown')} (Slot: {row['Slot']})"):
+                    # We use the row index + 2 for Google Sheets (1-based + header)
+                    sheet_row_index = index + 2 
+                    
+                    with st.expander(f"📦 {row.get('Order Name', 'No Name')} (Slot: {row['Slot']})"):
                         st.write(f"**Account:** {row['Account']}")
+                        item_found = False
                         for p in products:
                             if row.get(p, 0) > 0:
-                                st.write(f"- {p}: {row[p]}")
+                                st.write(f"- {p}: **{row[p]}**")
+                                item_found = True
+                        
+                        if not item_found:
+                            st.write("No items in this order.")
+
                         if st.button("Mark Delivered", key=f"recv_{index}"):
-                            inv_ws.update_cell(index + 2, 5, "Delivered")
+                            # Update Status in Column E (5)
+                            inv_ws.update_cell(sheet_row_index, 5, "Delivered")
+                            st.toast(f"Order {row.get('Order Name')} marked as delivered!")
                             st.rerun()
+    else:
+        st.info("The inventory sheet is empty.")
 
 # --- 3. DAILY SALES ---
 elif menu == "Daily Sales":

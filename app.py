@@ -5,17 +5,40 @@ import pandas as pd
 from datetime import datetime
 
 # --- CREDENTIALS CONFIG ---
+import streamlit as st
+import gspread
+from google.oauth2.service_account import Credentials
+import json
+import os
+
+# --- CREDENTIALS CONFIG ---
 scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-# If running on Render, use secrets. If local, use JSON file.
-if "gcp_service_account" in st.secrets:
-    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
-else:
-    creds = Credentials.from_service_account_file("google_creds.json", scopes=scope)
 
+def load_creds():
+    # 1. Try Render Environment Variable (The "Secret" you added in Render dashboard)
+    if "gcp_service_account" in os.environ:
+        try:
+            creds_json = os.environ.get("gcp_service_account")
+            # Render sometimes adds extra quotes, this cleans it up
+            if creds_json.startswith("'") and creds_json.endswith("'"):
+                creds_json = creds_json[1:-1]
+            
+            info = json.loads(creds_json)
+            return Credentials.from_service_account_info(info, scopes=scope)
+        except Exception as e:
+            st.error(f"Error parsing Environment Variable: {e}")
+
+    # 2. Try Local File (For testing on your laptop)
+    if os.path.exists("google_creds.json"):
+        return Credentials.from_service_account_file("google_creds.json", scopes=scope)
+
+    # 3. If neither exists
+    st.error("No credentials found! Make sure 'gcp_service_account' is set in Render Environment.")
+    st.stop()
+
+# Initialize connection
+creds = load_creds()
 client = gspread.authorize(creds)
-SHEET_NAME = "Grocery_Management_System"
-sh = client.open(SHEET_NAME)
-
 # --- UTILS ---
 def get_inventory_sheet():
     month_title = f"Inventory_{datetime.now().strftime('%b_%Y')}"

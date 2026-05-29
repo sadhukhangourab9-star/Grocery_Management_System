@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Grocery Admin</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: sans-serif; background: #0d1117; color: white; margin: 0; display: flex; }
+        .sidebar { width: 250px; background: #161b22; height: 100vh; padding: 20px; border-right: 1px solid #30363d; }
+        .content { flex: 1; padding: 30px; overflow-y: auto; height: 100vh; }
+        .card { background: #1c2128; border: 1px solid #30363d; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        button { cursor: pointer; padding: 10px 15px; border-radius: 5px; border: none; font-weight: bold; }
+        .btn-primary { background: #238636; color: white; }
+        .btn-sync { background: #1f6feb; color: white; width: 100%; margin-bottom: 20px; }
+        input, select { background: #0d1117; color: white; border: 1px solid #30363d; padding: 8px; border-radius: 4px; width: 100%; margin-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #30363d; padding: 10px; text-align: left; }
+        th { background: #161b22; }
+        .pending-order { border: 1px solid #f0883e; padding: 15px; margin: 10px 0; border-radius: 5px; }
+    </style>
+</head>
+<body>
+
+<div class="sidebar">
+    <h2>🛒 Grocery DB</h2>
+    <button class="btn-sync" onclick="syncDB()">🔄 Sync Database</button>
+    <div onclick="showPage('entry')" style="cursor:pointer; padding:10px;">📦 Amazon Entry</div>
+    <div onclick="showPage('receiver')" style="cursor:pointer; padding:10px;">🚚 Receiver View</div>
+</div>
+
+<div class="content">
+    <!-- PAGE: ENTRY -->
+    <div id="page-entry">
+        <h1>Amazon Order Entry</h1>
+        <div class="card">
+            <input type="date" id="o-date">
+            <select id="o-slot"><option>Loading Slots...</option></select>
+            <input type="text" id="o-acc" placeholder="Account Name">
+            <input type="text" id="o-name" placeholder="Order Name">
+            <hr>
+            <div id="product-inputs">Loading Products...</div>
+            <button class="btn-primary" onclick="submitOrder()">Submit Order</button>
+        </div>
+    </div>
+
+    <!-- PAGE: RECEIVER -->
+    <div id="page-receiver" style="display:none;">
+        <h1>Receiver View</h1>
+        <div class="card">
+            <h3>📊 Slot Summary (Total Load)</h3>
+            <select id="summary-slot-filter" onchange="renderReceiver()"></select>
+            <table id="summary-table">
+                <thead><tr><th>Product</th><th>Total Qty</th></tr></thead>
+                <tbody id="summary-body"></tbody>
+            </table>
+        </div>
+        <div id="pending-list"></div>
+    </div>
+</div>
+
+<script>
+    let meta = { products: [], slots: [] };
+    let receiverData = [];
+
+    async function syncDB() {
+        await fetch('/api/sync', {method: 'POST'});
+        alert("Database structure synced!");
+        location.reload();
+    }
+
+    async function loadMeta() {
+        const res = await fetch('/api/meta');
+        meta = await res.json();
+        
+        // Populate Slots
+        const slotSelects = [document.getElementById('o-slot'), document.getElementById('summary-slot-filter')];
+        slotSelects.forEach(s => {
+            s.innerHTML = meta.slots.map(sl => `<option value="${sl}">${sl}</option>`).join('');
+        });
+
+        // Populate Product Inputs
+        document.getElementById('product-inputs').innerHTML = meta.products.map(p => `
+            <div style="display:flex; justify-content:space-between; margin-bottom:5px;">
+                <label>${p}</label>
+                <input type="number" class="p-qty" data-name="${p}" value="0" style="width:60px; margin:0;">
+            </div>
+        `).join('');
+    }
+
+    function showPage(p) {
+        document.getElementById('page-entry').style.display = p === 'entry' ? 'block' : 'none';
+        document.getElementById('page-receiver').style.display = p === 'receiver' ? 'block' : 'none';
+        if(p === 'receiver') renderReceiver();
+    }
+
+    async function submitOrder() {
+        const qtys = {};
+        document.querySelectorAll('.p-qty').forEach(i => qtys[i.dataset.name] = i.value);
+        
+        await fetch('/api/order', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                date: document.getElementById('o-date').value,
+                slot: document.getElementById('o-slot').value,
+                account: document.getElementById('o-acc').value,
+                order_name: document.getElementById('o-name').value,
+                quantities: qtys
+            })
+        });
+        alert("Order Saved!");
+    }
+
+    async function renderReceiver() {
+        const res = await fetch('/api/receiver');
+        const data = await res.json();
+        const filter = document.getElementById('summary-slot-filter').value;
+        
+        // 1. Calculate Summary
+        const totals = {};
+        data.pending.forEach(order => {
+            if(order.Slot === filter) {
+                data.products.forEach(p => {
+                    totals[p] = (totals[p] || 0) + (parseInt(order[p]) || 0);
+                });
+            }
+        });
+
+        document.getElementById('summary-body').innerHTML = Object.entries(totals)
+            .filter(([p, q]) => q > 0)
+            .map(([p, q]) => `<tr><td>${p}</td><td>${q}</td></tr>`).join('');
+
+        // 2. Individual Orders
+        document.getElementById('pending-list').innerHTML = data.pending
+            .filter(order => order.Slot === filter)
+            .map((order, idx) => `
+                <div class="pending-order">
+                    <b>${order['Order Name']}</b> (${order.Account})<br>
+                    <button onclick="verifyOrder(${data.pending.indexOf(order)})">Mark Delivered</button>
+                </div>
+            `).join('');
+    }
+
+    async function verifyOrder(idx) {
+        await fetch('/api/verify', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ row_index: idx + 1 }) // Adjusting for "Old Stock" row in Sheet
+        });
+        renderReceiver();
+    }
+
+    window.onload = loadMeta;
+</script>
+</body>
+</html>
